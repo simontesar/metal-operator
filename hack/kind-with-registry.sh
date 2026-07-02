@@ -1,12 +1,6 @@
 #!/usr/bin/env bash
 #// SPDX-FileCopyrightText: 2024 SAP SE or an SAP affiliate company and IronCore contributors
 #// SPDX-License-Identifier: Apache-2.0
-#
-# Optional Kind node extraMounts via KIND_EXTRA_MOUNTS:
-#   semicolon-separated containerPath=hostPath pairs, e.g.
-#   /redfish-clients=/abs/path/on/host;/other=/second/path
-# When set, host paths must exist. Recreate the cluster to add or change
-# mounts (make kind-delete before make kind-create / make tilt-up).
 
 set -o errexit
 set -o nounset
@@ -18,7 +12,6 @@ KUBECTL=$REPO_ROOT/bin/kubectl
 
 # desired kind cluster name; default is "metal"
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-metal}"
-KIND_EXTRA_MOUNTS="${KIND_EXTRA_MOUNTS:-}"
 
 if [[ "$(kind get clusters)" =~ .*"${KIND_CLUSTER_NAME}".* ]]; then
   echo "cluster already exists, moving on"
@@ -28,6 +21,10 @@ fi
 reg_name='kind-registry'
 reg_port="${KIND_REGISTRY_PORT:-5000}"
 
+# Optional Kind node extraMounts via KIND_EXTRA_MOUNTS:
+#   semicolon-separated containerPath=hostPath pairs, e.g.
+#   /redfish-clients=/abs/path/on/host;/other=/second/path
+KIND_EXTRA_MOUNTS="${KIND_EXTRA_MOUNTS:-}"
 kind_extra_mounts=""
 if [[ -n "${KIND_EXTRA_MOUNTS}" ]]; then
   extra_mount_entries=()

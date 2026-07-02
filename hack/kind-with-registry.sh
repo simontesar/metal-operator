@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 #// SPDX-FileCopyrightText: 2024 SAP SE or an SAP affiliate company and IronCore contributors
 #// SPDX-License-Identifier: Apache-2.0
+#
+# Optional Kind node extraMounts via KIND_EXTRA_MOUNTS:
+#   semicolon-separated containerPath=hostPath pairs, e.g.
+#   /redfish-clients=/abs/path/on/host;/other=/second/path
+# When set, host paths must exist. Recreate the cluster to add or change
+# mounts (make kind-delete before make kind-create / make tilt-up).
 
 set -o errexit
 set -o nounset
@@ -12,6 +18,7 @@ KUBECTL=$REPO_ROOT/bin/kubectl
 
 # desired kind cluster name; default is "metal"
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-metal}"
+KIND_EXTRA_MOUNTS="${KIND_EXTRA_MOUNTS:-}"
 
 if [[ "$(kind get clusters)" =~ .*"${KIND_CLUSTER_NAME}".* ]]; then
   echo "cluster already exists, moving on"
@@ -20,6 +27,45 @@ fi
 
 reg_name='kind-registry'
 reg_port="${KIND_REGISTRY_PORT:-5000}"
+
+kind_extra_mounts=""
+if [[ -n "${KIND_EXTRA_MOUNTS}" ]]; then
+  extra_mount_entries=()
+  IFS=';' read -r -a mount_pairs <<< "${KIND_EXTRA_MOUNTS}"
+  for pair in "${mount_pairs[@]}"; do
+    if [[ -z "${pair}" ]]; then
+      continue
+    fi
+    if [[ "${pair}" != *"="* ]]; then
+      echo "invalid KIND_EXTRA_MOUNTS entry (expected containerPath=hostPath): ${pair}" >&2
+      exit 1
+    fi
+    container_path="${pair%%=*}"
+    host_path="${pair#*=}"
+    if [[ -z "${container_path}" || -z "${host_path}" ]]; then
+      echo "invalid KIND_EXTRA_MOUNTS entry (empty path): ${pair}" >&2
+      exit 1
+    fi
+    if [[ "${container_path}" != /* ]]; then
+      echo "KIND_EXTRA_MOUNTS container path must be absolute: ${container_path}" >&2
+      exit 1
+    fi
+    resolved_host_path="$(realpath "${host_path}")"
+    if [[ ! -d "${resolved_host_path}" ]]; then
+      echo "KIND_EXTRA_MOUNTS host path does not exist: ${resolved_host_path}" >&2
+      exit 1
+    fi
+    extra_mount_entries+=("  - hostPath: ${resolved_host_path}
+    containerPath: ${container_path}
+    readOnly: true")
+  done
+  if [[ "${#extra_mount_entries[@]}" -eq 0 ]]; then
+    echo "KIND_EXTRA_MOUNTS is set but contains no valid mount pairs" >&2
+    exit 1
+  fi
+
+  kind_extra_mounts=$'nodes:\n- role: control-plane\n  extraMounts:\n'"$(printf '%s\n' "${extra_mount_entries[@]}")"
+fi
 
 # create registry container unless it already exists
 running="$(docker inspect -f '{{.State.Running}}' "${reg_name}" 2>/dev/null || true)"
@@ -35,6 +81,7 @@ containerdConfigPatches:
 - |-
   [plugins."io.containerd.grpc.v1.cri".registry]
     config_path = "/etc/containerd/certs.d"
+${kind_extra_mounts}
 EOF
 
 # add the registry config to the nodes

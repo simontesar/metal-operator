@@ -1,0 +1,24 @@
+macPrefixes:
+- macPrefix: 23
+  manufacturer: Foo
+  protocol: RedfishWithRegistryPatch
+  port: 8000
+  type: bmc
+  defaultCredentials:
+    - username: foo
+      password: bar
+  console:
+    type: SSH
+    port: 22
+- macPrefix: 24
+  manufacturer: Dell
+  protocol: RedfishWithRegistryPatch
+  protocolScheme: https
+  port: 8000
+  type: bmc
+  defaultCredentials:
+    - username: foo
+      password: bar
+  console:
+    type: SSH
+    port: 22

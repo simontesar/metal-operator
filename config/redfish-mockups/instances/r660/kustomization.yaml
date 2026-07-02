@@ -1,0 +1,69 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: metal-operator-system
+
+components:
+- ../../components/mockup
+
+namePrefix: redfish-r660-
+
+labels:
+- includeSelectors: true
+  pairs:
+    app.kubernetes.io/instance: r660
+
+patches:
+# Resolves PLACEHOLDER_CLIENT and PLACEHOLDER_TLS_SECRET
+- target:
+    kind: Deployment
+    name: mockup
+  patch: |-
+    - op: replace
+      path: /spec/template/spec/containers/0/args/1
+      value: /clients/R660xs_iDRAC9_7_20_10_05_mockup_client
+    - op: replace
+      path: /spec/template/spec/volumes/1/secret/secretName
+      value: redfish-r660-tls
+# Resolves PLACEHOLDER_TLS_SECRET
+- target:
+    kind: Certificate
+    name: tls
+  patch: |-
+    - op: replace
+      path: /spec/secretName
+      value: redfish-r660-tls
+
+replacements:
+# Resolves SERVICE_NAME
+- source:
+    kind: Service
+    name: mockup
+    fieldPath: metadata.name
+  targets:
+  - select:
+      kind: Certificate
+      name: tls
+    fieldPaths:
+    - spec.dnsNames.0
+    - spec.dnsNames.1
+    options:
+      delimiter: "."
+      index: 0
+      create: true
+# Resolves SERVICE_NAMESPACE
+- source:
+    kind: Service
+    name: mockup
+    fieldPath: metadata.namespace
+  targets:
+  - select:
+      kind: Certificate
+      name: tls
+    fieldPaths:
+    - spec.dnsNames.0
+    - spec.dnsNames.1
+    options:
+      delimiter: "."
+      index: 1
+      create: true

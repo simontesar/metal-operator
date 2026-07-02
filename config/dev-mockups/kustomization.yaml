@@ -1,0 +1,10 @@
+resources:
+- ../dev
+- ../redfish-mockups
+
+secretGenerator:
+- name: macdb
+  namespace: metal-operator-system
+  behavior: replace
+  files:
+  - macdb.yaml

@@ -96,12 +96,23 @@ deploy_cert_manager()
 docker_build('controller', '.', target = 'manager')
 docker_build('mock-server', '.', target = 'mock-server')
 
-yaml_metal = kustomize('./config/dev')
+enable_dmtf_mockups = os.getenv("METAL_ENABLE_DMTF_MOCKUPS", "false").lower() == "true"
+if enable_dmtf_mockups:
+    clients_dir = os.getenv("REDFISH_MOCKUP_CLIENTS_DIR", "")
+    if not clients_dir:
+        fail("METAL_ENABLE_DMTF_MOCKUPS=true requires REDFISH_MOCKUP_CLIENTS_DIR to be set")
+    print("Using DMTF Redfish mockup stack from {}".format(clients_dir))
+
+kustomize_path = './config/dev-mockups' if enable_dmtf_mockups else './config/dev'
+yaml_metal = kustomize(kustomize_path)
 new_args = settings.get("new_args").get("metal")
 if new_args:
     yaml_metal = encode_yaml_stream(decode_yaml_stream(str(yaml_metal).replace("- args: []", "- args: {}".format(new_args))))
     print("default metal yaml {}\n".format(yaml_metal))
 k8s_yaml(yaml_metal)
+
+if enable_dmtf_mockups:
+    k8s_resource( 'redfish-r660-mockup', resource_deps=['redfish-r660-tls'], labels=['dmtf-mockup'])
 
 if settings.get("local_boot_operator") != "":
     local_boot_operator = settings.get("local_boot_operator")

@@ -12,6 +12,15 @@ KUBECTL=$REPO_ROOT/bin/kubectl
 
 # desired kind cluster name; default is "metal"
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-metal}"
+METAL_ENABLE_DMTF_MOCKUPS="${METAL_ENABLE_DMTF_MOCKUPS:-false}"
+REDFISH_MOCKUP_CLIENTS_DIR="${REDFISH_MOCKUP_CLIENTS_DIR:-}"
+
+if [[ "${METAL_ENABLE_DMTF_MOCKUPS}" == "true" ]]; then
+  if [[ -z "${REDFISH_MOCKUP_CLIENTS_DIR}" ]]; then
+    echo "METAL_ENABLE_DMTF_MOCKUPS=true requires REDFISH_MOCKUP_CLIENTS_DIR to be set" >&2
+    exit 1
+  fi
+fi
 
 if [[ "$(kind get clusters)" =~ .*"${KIND_CLUSTER_NAME}".* ]]; then
   echo "cluster already exists, moving on"
@@ -27,6 +36,25 @@ if [ "${running}" != 'true' ]; then
   docker run -d --restart=always -p "127.0.0.1:${reg_port}:5000" --name "${reg_name}" registry:2
 fi
 
+kind_extra_mounts=""
+if [[ "${METAL_ENABLE_DMTF_MOCKUPS}" == "true" ]]; then
+  resolved_mockup_clients_dir="$(realpath "${REDFISH_MOCKUP_CLIENTS_DIR}")"
+  if [[ ! -d "${resolved_mockup_clients_dir}" ]]; then
+    echo "redfish mockup clients directory does not exist: ${resolved_mockup_clients_dir}" >&2
+    exit 1
+  fi
+
+  kind_extra_mounts=$(cat <<EOF
+nodes:
+- role: control-plane
+  extraMounts:
+  - hostPath: ${resolved_mockup_clients_dir}
+    containerPath: /redfish-clients
+    readOnly: true
+EOF
+)
+fi
+
 # create a cluster with the local registry enabled in containerd
 cat <<EOF | kind create cluster --name "${KIND_CLUSTER_NAME}" --config=-
 kind: Cluster
@@ -35,6 +63,7 @@ containerdConfigPatches:
 - |-
   [plugins."io.containerd.grpc.v1.cri".registry]
     config_path = "/etc/containerd/certs.d"
+${kind_extra_mounts}
 EOF
 
 # add the registry config to the nodes

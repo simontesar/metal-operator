@@ -73,6 +73,68 @@ The local development environment can be deleted via
 make kind-delete
 ```
 
+### Optional: DMTF Redfish mockup servers
+
+By default, Tilt uses the in-repo Go Redfish mock sidecar. To additionally run
+one or more [DMTF Redfish-Mockup-Server](https://github.com/DMTF/Redfish-Mockup-Server)
+instances inside the Kind cluster, opt in with environment variables and the
+usual `make tilt-up` target.
+
+#### Prerequisites
+
+- A checkout of the DMTF mockup repository with client folders on disk
+- Recreate the Kind cluster when enabling or disabling the client mount
+
+#### Enable DMTF mockups
+
+```shell
+export METAL_ENABLE_DMTF_MOCKUPS=true
+export REDFISH_MOCKUP_CLIENTS_DIR=/path/to/Redfish-Mockup-Server/clients
+
+make kind-delete
+make tilt-up
+```
+
+`METAL_ENABLE_DMTF_MOCKUPS=true` switches Tilt to the `config/dev-mockups`
+kustomize stack, which extends the normal dev stack with DMTF mockup
+Deployments. The Go mock sidecar and `endpoint-sample` remain available.
+
+`REDFISH_MOCKUP_CLIENTS_DIR` is required in this mode. When
+`METAL_ENABLE_DMTF_MOCKUPS` is unset or `false`, the clients directory is
+ignored and Kind is created without `extraMounts`, even if
+`REDFISH_MOCKUP_CLIENTS_DIR` is set.
+
+#### Verify
+
+```shell
+docker exec metal-control-plane ls /redfish-clients
+kubectl get certificate,pods,endpoints,server -n metal-operator-system
+kubectl exec -n metal-operator-system deployment/metal-operator-controller-manager \
+  -c manager -- curl -k https://10.96.200.10:8000/redfish/v1
+```
+
+You should see both the existing Contoso server from the Go sidecar and an
+additional server created from the DMTF R660 mockup endpoint.
+
+#### Add another mockup instance
+
+1. Copy `config/redfish-mockups/instances/r660/` to a new instance directory.
+2. Update the instance overlay: unique name prefix, `-D /clients/<folder>`,
+   static `clusterIP`, and matching `Endpoint` MAC/IP.
+3. Register the new instance in `config/redfish-mockups/kustomization.yaml`.
+4. Add a matching `macPrefix` entry to `config/dev-mockups/macdb.yaml`.
+5. Recreate the cluster if needed, then run Tilt with both env vars set again.
+
+#### Return to the default dev stack
+
+```shell
+unset METAL_ENABLE_DMTF_MOCKUPS
+unset REDFISH_MOCKUP_CLIENTS_DIR
+
+make kind-delete
+make tilt-up
+```
+
 ### Connecting a Remote BMC in the Tilt Environment
 
 By default, Tilt runs against a local Redfish mock server. To point the environment at real hardware instead, apply the following changes.

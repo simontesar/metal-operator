@@ -1,0 +1,16 @@
+FROM golang:1.26.4 AS builder
+
+WORKDIR /workspace
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd/metalprobe-mock-controller/ cmd/metalprobe-mock-controller/
+COPY api/ api/
+COPY internal/probe/ internal/probe/
+COPY internal/api/ internal/api/
+RUN CGO_ENABLED=0 GOOS=linux go build -o metalprobe-mock-controller \
+    ./cmd/metalprobe-mock-controller
+
+FROM gcr.io/distroless/static:nonroot
+COPY --from=builder /workspace/metalprobe-mock-controller /
+USER 65532:65532
+ENTRYPOINT ["/metalprobe-mock-controller"]

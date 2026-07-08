@@ -1,0 +1,6 @@
+{
+    "@odata.type": "#ComputerSystem.v1_16_0.ComputerSystem",
+    "Id": "test-system",
+    "Name": "Test System",
+    "PowerState": "On"
+}

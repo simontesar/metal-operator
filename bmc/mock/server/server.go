@@ -10,9 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"maps"
 	"net/http"
+	"os"
 	"path"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -23,7 +26,7 @@ import (
 
 var (
 	//go:embed data/**
-	dataFS embed.FS
+	embeddedFS embed.FS
 )
 
 type Collection struct {
@@ -41,15 +44,15 @@ const (
 	biosSettingsPathSuffix = "Bios/Settings"
 	attributesKey          = "Attributes"
 
-	// Fixed file paths for BMC manager resources.
-	bmcFilePath         = "data/Managers/BMC/index.json"
-	bmcSettingsFilePath = "data/Managers/BMC/Settings/index.json"
+	// Relative paths for BMC manager resources.
+	bmcFileRel         = "Managers/BMC/index.json"
+	bmcSettingsFileRel = "Managers/BMC/Settings/index.json"
 
-	// Fixed file paths for firmware upgrade simulation.
-	upgradeTaskFilePath      = "data/TaskService/Tasks/upgrade/index.json"
-	upgradeStepsFilePath     = "data/TaskService/Tasks/upgrade/steps.json"
-	upgradeStepsFailFilePath = "data/TaskService/Tasks/upgrade/steps-fail.json"
-	upgradeTaskURI           = "/redfish/v1/TaskService/Tasks/upgrade"
+	// Relative paths for firmware upgrade simulation.
+	upgradeTaskFileRel      = "TaskService/Tasks/upgrade/index.json"
+	upgradeStepsFileRel     = "TaskService/Tasks/upgrade/steps.json"
+	upgradeStepsFailFileRel = "TaskService/Tasks/upgrade/steps-fail.json"
+	upgradeTaskURI          = "/redfish/v1/TaskService/Tasks/upgrade"
 
 	// Firmware version JSON field names updated on upgrade task completion.
 	// The target resource path is resolved dynamically via FirmwareInventory RelatedItem links.
@@ -65,17 +68,25 @@ var (
 )
 
 func init() {
-	noRebootSettings = mustLoadNoRebootAttrs("data/Registries/BiosAttributeRegistry.v1_0_0.json")
-	noRebootBMCSettings = mustLoadNoRebootAttrs("data/Registries/BMCAttributeRegistry/index.json")
+	embeddedData, err := fs.Sub(embeddedFS, "data")
+	if err != nil {
+		panic(fmt.Sprintf("embedded data root: %v", err))
+	}
+	noRebootSettings = mustLoadNoRebootAttrs(
+		embeddedData, "Registries/BiosAttributeRegistry.v1_0_0.json",
+	)
+	noRebootBMCSettings = mustLoadNoRebootAttrs(
+		embeddedData, "Registries/BMCAttributeRegistry/index.json",
+	)
 }
 
-// mustLoadNoRebootAttrs reads an attribute registry JSON from the embedded FS and
-// returns the names of all attributes whose ResetRequired field is false.
-// It panics if the file cannot be read or parsed so that a renamed or malformed
-// embedded registry is caught immediately at startup rather than silently
-// flipping all settings onto the slow (reboot-required) path.
-func mustLoadNoRebootAttrs(registryPath string) []string {
-	data, err := dataFS.ReadFile(registryPath)
+// mustLoadNoRebootAttrs reads an attribute registry JSON from fsys and returns
+// the names of all attributes whose ResetRequired field is false. It panics if
+// the file cannot be read or parsed so that a renamed or malformed embedded
+// registry is caught immediately at startup rather than silently flipping all
+// settings onto the slow (reboot-required) path.
+func mustLoadNoRebootAttrs(fsys fs.FS, registryPath string) []string {
+	data, err := fs.ReadFile(fsys, registryPath)
 	if err != nil {
 		panic(fmt.Sprintf("read %s: %v", registryPath, err))
 	}
@@ -144,10 +155,28 @@ func WithAuth() Option {
 	return func(s *MockServer) { s.authEnabled = true }
 }
 
+// WithDataDir configures the mock server to read Redfish data from dir on disk
+// instead of the embedded default. dir must be the Redfish root containing
+// index.json (e.g. .../redfish/v1).
+func WithDataDir(dir string) Option {
+	return func(s *MockServer) { s.dataDir = dir }
+}
+
+// openDataDir opens a filesystem rooted at the Redfish data directory.
+func openDataDir(dir string) (fs.FS, error) {
+	if _, err := os.Stat(filepath.Join(dir, "index.json")); err != nil {
+		return nil, fmt.Errorf("no Redfish data under %s (expected index.json)", dir)
+	}
+	return os.DirFS(dir), nil
+}
+
 type MockServer struct {
 	log               logr.Logger
 	addr              string
 	handler           http.Handler
+	dataFS            fs.FS
+	dataDir           string
+	initErr           error
 	mu                sync.RWMutex
 	overrides         map[string]any
 	upgradeGen        int64                 // incremented on each SimpleUpdate to cancel stale goroutines
@@ -160,13 +189,30 @@ type MockServer struct {
 	onDelete          map[string]memberHook // collection URL suffix → hook called before a member is removed
 }
 
-// loadAccountsFromEmbedded seeds the authentication store by reading the
-// embedded AccountService/Accounts collection and extracting UserName/Password
-// pairs. This keeps the initial credentials in sync with the data files rather
-// than duplicating them in Go code.
-func loadAccountsFromEmbedded() map[string]string {
+func (s *MockServer) readFile(name string) ([]byte, error) {
+	return fs.ReadFile(s.dataFS, name)
+}
+
+func (s *MockServer) resolvePath(urlPath string) string {
+	trimmed := strings.TrimPrefix(urlPath, "/redfish/v1")
+	trimmed = strings.Trim(trimmed, "/")
+
+	if trimmed == "" {
+		return "index.json"
+	}
+	if strings.HasSuffix(trimmed, ".json") {
+		return trimmed
+	}
+	return path.Join(trimmed, "index.json")
+}
+
+// loadAccounts seeds the authentication store by reading the AccountService/
+// Accounts collection and extracting UserName/Password pairs. This keeps the
+// initial credentials in sync with the data files rather than duplicating them
+// in Go code.
+func (s *MockServer) loadAccounts() map[string]string {
 	result := make(map[string]string)
-	data, err := dataFS.ReadFile("data/AccountService/Accounts/index.json")
+	data, err := s.readFile("AccountService/Accounts/index.json")
 	if err != nil {
 		return result
 	}
@@ -175,7 +221,7 @@ func loadAccountsFromEmbedded() map[string]string {
 		return result
 	}
 	for _, member := range collection.Members {
-		memberData, err := dataFS.ReadFile(resolvePath(member.OdataID))
+		memberData, err := s.readFile(s.resolvePath(member.OdataID))
 		if err != nil {
 			continue
 		}
@@ -194,12 +240,16 @@ func loadAccountsFromEmbedded() map[string]string {
 }
 
 func NewMockServer(log logr.Logger, addr string, opts ...Option) *MockServer {
+	embeddedData, err := fs.Sub(embeddedFS, "data")
+	if err != nil {
+		panic(fmt.Sprintf("embedded data root: %v", err))
+	}
 	s := &MockServer{
 		addr:              addr,
 		log:               log,
+		dataFS:            embeddedData,
 		overrides:         make(map[string]any),
 		upgradedResources: make(map[string]string),
-		accounts:          loadAccountsFromEmbedded(),
 		// onCreate hooks run after a new collection member is stored.
 		// Add an entry here to handle side-effects for additional collection types.
 		onCreate: map[string]memberHook{
@@ -207,7 +257,7 @@ func NewMockServer(log logr.Logger, addr string, opts ...Option) *MockServer {
 				// Seed missing fields from the embedded account template so that the
 				// new account has the full Redfish structure (Actions, PasswordExpiration,
 				// AccountTypes, Links, etc.) without enumerating individual fields here.
-				if raw, err := dataFS.ReadFile("data/AccountService/Accounts/2/index.json"); err == nil {
+				if raw, err := s.readFile("AccountService/Accounts/2/index.json"); err == nil {
 					var tmpl map[string]any
 					if json.Unmarshal(raw, &tmpl) == nil {
 						for k, v := range tmpl {
@@ -277,6 +327,19 @@ func NewMockServer(log logr.Logger, addr string, opts ...Option) *MockServer {
 		opt(s)
 	}
 
+	if s.dataDir != "" {
+		dataFS, err := openDataDir(s.dataDir)
+		if err != nil {
+			s.initErr = err
+		} else {
+			s.dataFS = dataFS
+		}
+	}
+
+	if s.initErr == nil {
+		s.accounts = s.loadAccounts()
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/redfish/v1/", s.redfishHandler)
 	s.handler = mux
@@ -328,7 +391,7 @@ func (s *MockServer) redfishHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *MockServer) handleGet(w http.ResponseWriter, r *http.Request) {
-	filePath := resolvePath(r.URL.Path)
+	filePath := s.resolvePath(r.URL.Path)
 
 	s.mu.RLock()
 	cached, hasOverride := s.overrides[filePath]
@@ -343,7 +406,7 @@ func (s *MockServer) handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	content, err := dataFS.ReadFile(filePath)
+	content, err := s.readFile(filePath)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -380,7 +443,7 @@ func (s *MockServer) handleCollectionPost(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	urlPath := resolvePath(r.URL.Path)
+	urlPath := s.resolvePath(r.URL.Path)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -408,7 +471,7 @@ func (s *MockServer) handleCollectionPost(w http.ResponseWriter, r *http.Request
 		}
 	} else {
 		s.log.Info("Using embedded data for POST", "path", urlPath)
-		data, err := dataFS.ReadFile(urlPath)
+		data, err := s.readFile(urlPath)
 		if err != nil {
 			s.log.Error(err, "Failed to read embedded data for POST", "path", urlPath)
 			http.NotFound(w, r)
@@ -435,7 +498,7 @@ func (s *MockServer) handleCollectionPost(w http.ResponseWriter, r *http.Request
 	}
 	newID := fmt.Sprintf("%d", maxID+1)
 	location := path.Join(r.URL.Path, newID)
-	newMemberPath := resolvePath(location)
+	newMemberPath := s.resolvePath(location)
 	base.Members = append(base.Members, Member{OdataID: location})
 	s.log.Info("Adding new member", "id", newID, "location", location, "memberPath", newMemberPath)
 	if strings.HasSuffix(r.URL.Path, "/Subscriptions") {
@@ -470,7 +533,7 @@ func (s *MockServer) handlePatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filePath := resolvePath(r.URL.Path)
+	filePath := s.resolvePath(r.URL.Path)
 	base, err := s.loadResource(filePath)
 	if err != nil {
 		s.handleError(w, r, err)
@@ -508,7 +571,7 @@ func (s *MockServer) handlePatch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *MockServer) handleDelete(w http.ResponseWriter, r *http.Request) {
-	filePath := resolvePath(r.URL.Path)
+	filePath := s.resolvePath(r.URL.Path)
 	base, err := s.loadResource(filePath)
 	if err != nil {
 		s.handleError(w, r, err)
@@ -544,7 +607,7 @@ func (s *MockServer) handleDelete(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		data, err := dataFS.ReadFile(collectionPath + "/index.json")
+		data, err := s.readFile(collectionPath + "/index.json")
 		if err != nil {
 			s.mu.Unlock()
 			http.NotFound(w, r)
@@ -594,12 +657,12 @@ func (s *MockServer) handleSimpleUpdate(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	stepsPath := upgradeStepsFilePath
+	stepsPath := upgradeStepsFileRel
 	if strings.Contains(req.ImageURI, "fail") {
-		stepsPath = upgradeStepsFailFilePath
+		stepsPath = upgradeStepsFailFileRel
 	}
 
-	stepsData, err := dataFS.ReadFile(stepsPath)
+	stepsData, err := s.readFile(stepsPath)
 	if err != nil {
 		http.Error(w, "steps not found", http.StatusInternalServerError)
 		return
@@ -611,7 +674,7 @@ func (s *MockServer) handleSimpleUpdate(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// Load the base task template and seed it with the first step.
-	taskBase, err := s.loadResource(upgradeTaskFilePath)
+	taskBase, err := s.loadResource(upgradeTaskFileRel)
 	if err != nil {
 		http.Error(w, "task not found", http.StatusInternalServerError)
 		return
@@ -621,7 +684,7 @@ func (s *MockServer) handleSimpleUpdate(w http.ResponseWriter, r *http.Request, 
 	s.mu.Lock()
 	s.upgradeGen++
 	gen := s.upgradeGen
-	s.overrides[upgradeTaskFilePath] = taskBase
+	s.overrides[upgradeTaskFileRel] = taskBase
 	s.mu.Unlock()
 
 	go s.doUpgradeSteps(gen, steps, req.ImageURI, req.Targets)
@@ -649,10 +712,10 @@ func (s *MockServer) doUpgradeSteps(gen int64, steps []map[string]any, imageURI 
 			s.mu.Unlock()
 			return
 		}
-		taskBase, err := s.loadResourceLocked(upgradeTaskFilePath)
+		taskBase, err := s.loadResourceLocked(upgradeTaskFileRel)
 		if err == nil {
 			mergeJSON(taskBase, steps[i])
-			s.overrides[upgradeTaskFilePath] = taskBase
+			s.overrides[upgradeTaskFileRel] = taskBase
 		}
 		s.mu.Unlock()
 	}
@@ -679,7 +742,7 @@ func (s *MockServer) doUpgradeSteps(gen int64, steps []map[string]any, imageURI 
 // The caller must hold s.mu.
 func (s *MockServer) applyFirmwareVersionsLocked(targets []string, imageURI string) {
 	for _, target := range targets {
-		invPath := resolvePath(target)
+		invPath := s.resolvePath(target)
 		inv, err := s.loadResourceLocked(invPath)
 		if err != nil {
 			s.log.Error(err, "Failed to load firmware inventory item", "target", target)
@@ -692,7 +755,7 @@ func (s *MockServer) applyFirmwareVersionsLocked(targets []string, imageURI stri
 			if odataID == "" {
 				continue
 			}
-			resPath := resolvePath(odataID)
+			resPath := s.resolvePath(odataID)
 			res, err := s.loadResourceLocked(resPath)
 			if err != nil {
 				s.log.Error(err, "Failed to load related resource", "path", odataID)
@@ -715,7 +778,7 @@ func (s *MockServer) applyFirmwareVersionsLocked(targets []string, imageURI stri
 
 func (s *MockServer) handleSystemReset(w http.ResponseWriter, r *http.Request, body []byte) {
 	basePath := strings.TrimSuffix(r.URL.Path, "/Actions/ComputerSystem.Reset")
-	systemPath := resolvePath(basePath)
+	systemPath := s.resolvePath(basePath)
 
 	resetType, err := s.parseResetType(body, powerOffStates, powerOnStates, powerResetStates)
 	if err != nil {
@@ -766,7 +829,7 @@ func (s *MockServer) handleChangePassword(w http.ResponseWriter, r *http.Request
 		return
 	}
 	accountPath := strings.TrimSuffix(r.URL.Path, "/Actions/ManagerAccount.ChangePassword")
-	filePath := resolvePath(accountPath)
+	filePath := s.resolvePath(accountPath)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	account, err := s.loadResourceLocked(filePath)
@@ -789,7 +852,7 @@ func (s *MockServer) handleChangePassword(w http.ResponseWriter, r *http.Request
 
 func (s *MockServer) handleBMCReset(w http.ResponseWriter, r *http.Request, body []byte) {
 	basePath := strings.TrimSuffix(r.URL.Path, "/Actions/Manager.Reset")
-	bmcPath := resolvePath(basePath)
+	bmcPath := s.resolvePath(basePath)
 
 	if !containsAny(string(body), powerResetBMCStates) {
 		s.handleError(w, r, fmt.Errorf("%w: %s", errBadReset, string(body)))
@@ -927,6 +990,8 @@ func (s *MockServer) applyBMCSettings(urlPath string, update map[string]any) err
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	bmcFilePath := bmcFileRel
+
 	bmcBase, err := s.loadResourceLocked(bmcFilePath)
 	if err != nil {
 		return err
@@ -958,6 +1023,9 @@ func (s *MockServer) applyBMCSettings(urlPath string, update map[string]any) err
 func (s *MockServer) applyPendingBMCSettings() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	bmcFilePath := bmcFileRel
+	bmcSettingsFilePath := bmcSettingsFileRel
 
 	pending, err := s.loadResourceLocked(bmcSettingsFilePath)
 	if err != nil {
@@ -992,7 +1060,7 @@ func (s *MockServer) applyPendingBMCSettings() error {
 // GetBMCSettingAttr returns the current BMC Attributes map for the given managerID
 // (e.g. "BMC"). Returns nil if the resource cannot be loaded.
 func (s *MockServer) GetBMCSettingAttr(managerID string) map[string]any {
-	filePath := fmt.Sprintf("data/Managers/%s/index.json", managerID)
+	filePath := path.Join("Managers", managerID, "index.json")
 	resource, err := s.loadResource(filePath)
 	if err != nil {
 		return nil
@@ -1004,8 +1072,8 @@ func (s *MockServer) GetBMCSettingAttr(managerID string) map[string]any {
 // ResetBMCSettings resets the BMC attribute state on the server to defaults,
 // clearing both current and pending attributes. managerID is the folder name under data/Managers/ (e.g. "BMC").
 func (s *MockServer) ResetBMCSettings(managerID string) {
-	filePath := fmt.Sprintf("data/Managers/%s/index.json", managerID)
-	settingsFilePath := fmt.Sprintf("data/Managers/%s/Settings/index.json", managerID)
+	filePath := path.Join("Managers", managerID, "index.json")
+	settingsFilePath := path.Join("Managers", managerID, "Settings", "index.json")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.resetResourceFromEmbeddedLocked(filePath)
@@ -1015,8 +1083,8 @@ func (s *MockServer) ResetBMCSettings(managerID string) {
 // ResetBIOSSettings resets the BIOS attribute state on the server to defaults,
 // clearing both current and pending attributes. systemID is the folder name under data/Systems/ (e.g. "437XR1138R2").
 func (s *MockServer) ResetBIOSSettings(systemID string) {
-	filePath := fmt.Sprintf("data/Systems/%s/Bios/index.json", systemID)
-	settingsFilePath := fmt.Sprintf("data/Systems/%s/Bios/Settings/index.json", systemID)
+	filePath := path.Join("Systems", systemID, "Bios", "index.json")
+	settingsFilePath := path.Join("Systems", systemID, "Bios", "Settings", "index.json")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.resetResourceFromEmbeddedLocked(filePath)
@@ -1040,7 +1108,7 @@ func (s *MockServer) ResetUpgradeTask(resourceURIs ...string) {
 	defer s.mu.Unlock()
 	s.upgradeGen++ // invalidate any running doUpgradeSteps goroutine
 	if len(resourceURIs) == 0 {
-		s.resetResourceFromEmbeddedLocked(upgradeTaskFilePath)
+		s.resetResourceFromEmbeddedLocked(upgradeTaskFileRel)
 		for _, p := range s.upgradedResources {
 			s.resetResourceFromEmbeddedLocked(p)
 		}
@@ -1054,7 +1122,7 @@ func (s *MockServer) ResetUpgradeTask(resourceURIs ...string) {
 		}
 	}
 	if len(s.upgradedResources) == 0 {
-		s.resetResourceFromEmbeddedLocked(upgradeTaskFilePath)
+		s.resetResourceFromEmbeddedLocked(upgradeTaskFileRel)
 	}
 }
 
@@ -1063,7 +1131,7 @@ func (s *MockServer) ResetUpgradeTask(resourceURIs ...string) {
 // resourceLock, Attributes, and any other state accumulated during a test.
 // The caller must hold s.mu.
 func (s *MockServer) resetResourceFromEmbeddedLocked(filePath string) {
-	raw, err := dataFS.ReadFile(filePath)
+	raw, err := s.readFile(filePath)
 	if err != nil {
 		s.log.Error(err, "Failed to read embedded default", "path", filePath)
 		return
@@ -1107,7 +1175,7 @@ func (s *MockServer) applyBiosSettings(urlPath string, update map[string]any) er
 
 	// Apply to current BIOS settings.
 	biosURL := strings.TrimSuffix(urlPath, "/Settings")
-	biosPath := resolvePath(biosURL)
+	biosPath := s.resolvePath(biosURL)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1126,8 +1194,8 @@ func (s *MockServer) applyBiosSettings(urlPath string, update map[string]any) er
 }
 
 func (s *MockServer) applyPendingBiosSettings(basePath string) error {
-	pendingPath := resolvePath(path.Join(basePath, biosSettingsPathSuffix))
-	currentPath := resolvePath(path.Join(basePath, "Bios"))
+	pendingPath := s.resolvePath(path.Join(basePath, biosSettingsPathSuffix))
+	currentPath := s.resolvePath(path.Join(basePath, "Bios"))
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1192,7 +1260,7 @@ func (s *MockServer) loadResourceLocked(filePath string) (map[string]any, error)
 		return result, nil
 	}
 
-	data, err := dataFS.ReadFile(filePath)
+	data, err := s.readFile(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", errNotFound, err)
 	}
@@ -1267,7 +1335,7 @@ func (s *MockServer) Authenticate(username, password string) bool {
 // GetAccountNames returns the set of UserName values currently in the account
 // collection (including any created by tests). Suitable for gomega HaveKey assertions.
 func (s *MockServer) GetAccountNames() map[string]struct{} {
-	collection, err := s.loadResource("data/AccountService/Accounts/index.json")
+	collection, err := s.loadResource("AccountService/Accounts/index.json")
 	if err != nil {
 		return map[string]struct{}{}
 	}
@@ -1282,7 +1350,7 @@ func (s *MockServer) GetAccountNames() map[string]struct{} {
 		if odataID == "" {
 			continue
 		}
-		member, err := s.loadResource(resolvePath(odataID))
+		member, err := s.loadResource(s.resolvePath(odataID))
 		if err != nil {
 			continue
 		}
@@ -1299,18 +1367,22 @@ func (s *MockServer) GetAccountNames() map[string]struct{} {
 func (s *MockServer) ResetAccounts() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.resetResourceFromEmbeddedLocked("data/AccountService/Accounts/index.json")
+	accountsIndex := "AccountService/Accounts/index.json"
+	accountsPrefix := "AccountService/Accounts/"
+	s.resetResourceFromEmbeddedLocked(accountsIndex)
 	for key := range s.overrides {
-		if strings.HasPrefix(key, "data/AccountService/Accounts/") &&
-			key != "data/AccountService/Accounts/index.json" {
+		if strings.HasPrefix(key, accountsPrefix) && key != accountsIndex {
 			delete(s.overrides, key)
 		}
 	}
-	s.accounts = loadAccountsFromEmbedded()
+	s.accounts = s.loadAccounts()
 }
 
 // Start starts the mock server and stops on ctx cancellation.
 func (s *MockServer) Start(ctx context.Context) error {
+	if s.initErr != nil {
+		return s.initErr
+	}
 	if s.handler == nil {
 		return errors.New("mock redfish handler is nil")
 	}
@@ -1338,19 +1410,6 @@ func (s *MockServer) Start(ctx context.Context) error {
 	}
 
 	return nil
-}
-
-func resolvePath(urlPath string) string {
-	trimmed := strings.TrimPrefix(urlPath, "/redfish/v1")
-	trimmed = strings.Trim(trimmed, "/")
-
-	if trimmed == "" {
-		return "data/index.json"
-	}
-	if strings.HasSuffix(trimmed, ".json") {
-		return path.Join("data", trimmed)
-	}
-	return path.Join("data", trimmed, "index.json")
 }
 
 func deepCopy(m map[string]any) map[string]any {

@@ -18,7 +18,9 @@ import (
 
 func main() {
 	var addr string
+	var dataDir string
 	flag.StringVar(&addr, "addr", ":8000", "Address for the mock Redfish server to listen on (e.g. :8000)")
+	flag.StringVar(&dataDir, "data", "", "Path to the Redfish root directory containing index.json (default: embedded data)")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -31,7 +33,11 @@ func main() {
 	log := ctrl.Log.WithName("RedfishMockServer")
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	srv := server.NewMockServer(log, addr)
+	var serverOpts []server.Option
+	if dataDir != "" {
+		serverOpts = append(serverOpts, server.WithDataDir(dataDir))
+	}
+	srv := server.NewMockServer(log, addr, serverOpts...)
 
 	if err := srv.Start(ctx); err != nil {
 		log.Error(err, "Failed to start mock server")

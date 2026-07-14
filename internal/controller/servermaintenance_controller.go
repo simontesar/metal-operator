@@ -257,7 +257,7 @@ func (r *ServerMaintenanceReconciler) handleInMaintenanceState(ctx context.Conte
 	log.V(1).Info("Applied ServerBootConfiguration for Server")
 
 	if config == nil {
-		if err := r.setAndPatchServerPowerState(ctx, server, maintenance); err != nil {
+		if err := r.setAndPatchServerState(ctx, server, maintenance); err != nil {
 			return ctrl.Result{}, err
 		}
 		log.V(1).Info("Patched server power state", "Server", server.Name, "Power", maintenance.Spec.ServerPower)
@@ -278,7 +278,7 @@ func (r *ServerMaintenanceReconciler) handleInMaintenanceState(ctx context.Conte
 
 	if config.Status.State == metalv1alpha1.ServerBootConfigurationStateReady {
 		log.V(1).Info("Server maintenance boot configuration is ready", "Server", server.Name)
-		if err := r.setAndPatchServerPowerState(ctx, server, maintenance); err != nil {
+		if err := r.setAndPatchServerState(ctx, server, maintenance); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -320,9 +320,12 @@ func (r *ServerMaintenanceReconciler) applyServerBootConfiguration(ctx context.C
 	return config, nil
 }
 
-func (r *ServerMaintenanceReconciler) setAndPatchServerPowerState(ctx context.Context, server *metalv1alpha1.Server, maintenance *metalv1alpha1.ServerMaintenance) error {
+func (r *ServerMaintenanceReconciler) setAndPatchServerState(ctx context.Context, server *metalv1alpha1.Server, maintenance *metalv1alpha1.ServerMaintenance) error {
 	serverBase := server.DeepCopy()
 	server.Spec.Power = maintenance.Spec.ServerPower
+	if maintenance.Spec.LocatorLED != "" {
+		server.Spec.IndicatorLED = maintenance.Spec.LocatorLED
+	}
 	return r.Patch(ctx, server, client.MergeFrom(serverBase))
 }
 
@@ -391,6 +394,15 @@ func (r *ServerMaintenanceReconciler) cleanup(ctx context.Context, maintenance *
 	}
 
 	if ref := server.Spec.ServerMaintenanceRef; ref != nil && ref.Name == maintenance.Name && ref.Namespace == maintenance.Namespace {
+		if maintenance.Spec.LocatorLED != "" {
+			serverBase := server.DeepCopy()
+			server.Spec.IndicatorLED = metalv1alpha1.OffIndicatorLED
+			if err := r.Patch(ctx, server, client.MergeFrom(serverBase)); err != nil && !apierrors.IsNotFound(err) {
+				return fmt.Errorf("failed to clear LocatorLED on Server: %w", err)
+			}
+			log.V(1).Info("Cleared LocatorLED on Server", "Server", server.Name)
+		}
+
 		if err := r.removeMaintenanceRefFromServer(ctx, server); err != nil {
 			return fmt.Errorf("failed to remove ServerMaintenance ref from Server: %w", err)
 		}
@@ -416,18 +428,39 @@ func (r *ServerMaintenanceReconciler) cleanup(ctx context.Context, maintenance *
 		if server.Spec.ServerClaimRef == nil {
 			return nil
 		}
-		serverClaim := &metalv1alpha1.ServerClaim{}
-		if err := r.Get(ctx, client.ObjectKey{Name: server.Spec.ServerClaimRef.Name, Namespace: server.Spec.ServerClaimRef.Namespace}, serverClaim); err != nil {
-			return fmt.Errorf("failed to get ServerClaim: %w", err)
+		serverMaintenancesList := &metalv1alpha1.ServerMaintenanceList{}
+		if err := r.List(ctx, serverMaintenancesList, client.MatchingFields{serverRefField: server.Name}); err != nil {
+			return fmt.Errorf("failed to list ServerMaintenances for Server %s: %w", server.Name, err)
 		}
-		serverClaimBase := serverClaim.DeepCopy()
-		metautils.DeleteLabels(serverClaim, []string{
-			metalv1alpha1.ServerMaintenanceApprovedLabelKey,
-			metalv1alpha1.ServerMaintenanceNeededLabelKey,
-		})
-		if err := r.Patch(ctx, serverClaim, client.MergeFrom(serverClaimBase)); err != nil {
-			return fmt.Errorf("failed to patch ServerClaim annotations: %w", err)
+		activeItems := serverMaintenancesList.Items[:0]
+		for i := range serverMaintenancesList.Items {
+			m := &serverMaintenancesList.Items[i]
+			if m.Name == maintenance.Name && m.Namespace == maintenance.Namespace {
+				continue
+			}
+			if !m.DeletionTimestamp.IsZero() {
+				continue
+			}
+			activeItems = append(activeItems, *m)
 		}
+		serverMaintenancesList.Items = activeItems
+		if len(serverMaintenancesList.Items) == 0 {
+			serverClaim := &metalv1alpha1.ServerClaim{}
+			if err := r.Get(ctx, client.ObjectKey{Name: server.Spec.ServerClaimRef.Name, Namespace: server.Spec.ServerClaimRef.Namespace}, serverClaim); err != nil {
+				return fmt.Errorf("failed to get ServerClaim: %w", err)
+			}
+			serverClaimBase := serverClaim.DeepCopy()
+			metautils.DeleteLabels(serverClaim, []string{
+				metalv1alpha1.ServerMaintenanceApprovedLabelKey,
+				metalv1alpha1.ServerMaintenanceNeededLabelKey,
+			})
+			if err := r.Patch(ctx, serverClaim, client.MergeFrom(serverClaimBase)); err != nil {
+				return fmt.Errorf("failed to patch ServerClaim labels: %w", err)
+			}
+		} else {
+			log.V(1).Info("Postponing the removal of approval labels as other maintenances are in queue", "Server", server.Name)
+		}
+
 	}
 	return nil
 }

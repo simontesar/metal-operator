@@ -148,6 +148,7 @@
                 "ForceRestart",
                 "Nmi",
                 "ForceOn",
+                "PowerCycle",
                 "PushPowerButton"
             ]
         },

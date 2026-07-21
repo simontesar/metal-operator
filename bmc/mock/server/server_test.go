@@ -11,7 +11,9 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 )
@@ -73,5 +75,68 @@ func TestWithDataDirInvalidPathSetsInitErr(t *testing.T) {
 	err := srv.Start(context.Background())
 	if err == nil {
 		t.Fatal("expected Start to return init error")
+	}
+}
+
+func TestManagerResetUpdatesLastResetTime(t *testing.T) {
+	srv := NewMockServer(logr.Discard(), ":0")
+	if srv.initErr != nil {
+		t.Fatalf("unexpected init error: %v", srv.initErr)
+	}
+
+	getManager := func() map[string]any {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/redfish/v1/Managers/BMC", nil)
+		srv.handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET manager status = %d, want %d", rec.Code, http.StatusOK)
+		}
+		body, err := io.ReadAll(rec.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		var manager map[string]any
+		if err := json.Unmarshal(body, &manager); err != nil {
+			t.Fatalf("unmarshal body: %v", err)
+		}
+		return manager
+	}
+
+	before := getManager()
+	beforeTime, _ := before["LastResetTime"].(string)
+	if beforeTime == "" {
+		t.Fatal("expected seeded LastResetTime on Manager")
+	}
+
+	beforeReset := time.Now().UTC()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/redfish/v1/Managers/BMC/Actions/Manager.Reset",
+		strings.NewReader(`{"ResetType":"GracefulRestart"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	srv.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("POST reset status = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+
+	time.Sleep(300 * time.Millisecond)
+
+	after := getManager()
+	afterTime, ok := after["LastResetTime"].(string)
+	if !ok || afterTime == "" {
+		t.Fatal("expected LastResetTime after BMC reset")
+	}
+	if afterTime == beforeTime {
+		t.Fatalf("LastResetTime unchanged: %s", afterTime)
+	}
+	parsed, err := time.Parse(time.RFC3339, afterTime)
+	if err != nil {
+		t.Fatalf("LastResetTime not RFC3339: %v", err)
+	}
+	if parsed.Before(beforeReset.Add(-time.Second)) {
+		t.Fatalf("LastResetTime %v is before reset", parsed)
 	}
 }

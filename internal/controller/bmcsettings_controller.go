@@ -24,8 +24,8 @@ import (
 	"github.com/ironcore-dev/controller-utils/conditionutils"
 	metalv1alpha1 "github.com/ironcore-dev/metal-operator/api/v1alpha1"
 	"github.com/ironcore-dev/metal-operator/bmc"
-	"github.com/ironcore-dev/metal-operator/internal/bmcutils"
 	metalutil "github.com/ironcore-dev/metal-operator/internal/util"
+	"github.com/ironcore-dev/metal-operator/pkg/bmcutils"
 	"github.com/stmcginnis/gofish/schemas"
 )
 
@@ -435,7 +435,7 @@ func (r *BMCSettingsReconciler) updateSettingsAndVerify(ctx context.Context, set
 				return ctrl.Result{}, fmt.Errorf("failed to check BMC settings provided: %w", err)
 			}
 
-			err = bmcClient.SetBMCAttributesImmediately(ctx, bmcObj.Spec.BMCUUID, settingsDiff)
+			_, err = bmcClient.SetBMCAttributesImmediately(ctx, bmcObj.Spec.BMCUUID, settingsDiff)
 			if err != nil {
 				return ctrl.Result{}, fmt.Errorf("failed to set BMC settings: %w", err)
 			}
@@ -813,7 +813,10 @@ func (r *BMCSettingsReconciler) getBMCSettingsDifference(ctx context.Context, se
 	}
 	effectiveSettingsMap := ApplyVariables(settings.Spec.SettingsMap, resolvedVars)
 
-	currentSettings, err := bmcClient.GetBMCAttributeValues(ctx, bmcObj.Spec.BMCUUID, effectiveSettingsMap)
+	currentSettings, err := bmcClient.GetBMCAttributeValues(ctx, bmc.GetBMCAttributeValuesRequest{
+		UUID:       bmcObj.Spec.BMCUUID,
+		Attributes: effectiveSettingsMap,
+	})
 	if err != nil {
 		return diff, fmt.Errorf("failed to get BMC settings: %w", err)
 	}

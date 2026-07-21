@@ -944,6 +944,7 @@ func (s *MockServer) doBMCReset(bmcPath string) {
 
 	s.mu.Lock()
 	if base, ok := s.overrides[bmcPath].(map[string]any); ok {
+		base["LastResetTime"] = time.Now().UTC().Format(time.RFC3339)
 		s.setLocked(base, false)
 		s.log.Info("BMC reset complete")
 	}

@@ -5,10 +5,10 @@ linters:
   default: none
   enable:
     - copyloopvar
+    - depguard
     - dupl
     - errcheck
     - ginkgolinter
-    - goconst
     - gocyclo
     - govet
     - ineffassign
@@ -28,6 +28,12 @@ linters:
       logcheck:
         type: "module"
         description: Checks Go logging calls for Kubernetes logging conventions.
+    depguard:
+      rules:
+        forbid-sort-pkg:
+          deny:
+            - pkg: sort
+              desc: Should be replaced with slices package
     revive:
       rules:
         - name: comment-spacings
@@ -35,6 +41,7 @@ linters:
     modernize:
       disable:
         - omitzero
+        - newexpr
   exclusions:
     generated: lax
     rules:
@@ -48,8 +55,14 @@ linters:
       - linters:
           - dupl
           - lll
-          - goconst
         path: bmc/*
+      # ServerMaintenance, BMCSettings, BMCVersion, BIOSVersion, BIOSSettings and their
+      # Set variants are deprecated. The operator still serves and reconciles the
+      # existing resources, so these legacy consumers reference the types until they
+      # are fully removed.
+      - linters:
+          - staticcheck
+        text: "SA1019.*metalv1alpha1\\.(ServerMaintenance|BMCSettingsSet|BMCSettings|BMCVersionSet|BMCVersion|BIOSVersionSet|BIOSVersion|BIOSSettingsSet|BIOSSettings)\\b"
       # The Endpoint resource is deprecated (see issue #1018). The operator still
       # serves existing Endpoint objects and the endpointRef access path, so these
       # legacy consumers reference the type until the resource is fully removed.
@@ -62,6 +75,13 @@ linters:
       - linters:
           - staticcheck
         text: "SA1019.*\\.EndpointRef is deprecated"
+      # Server.spec.power is deprecated. The field is an internal
+      # actuator variable that controllers still write while traversing the state machine
+      # and as surrogate input from ServerClaim/ServerMaintenance. Legacy access remains
+      # until the field is fully removed in a future release.
+      - linters:
+          - staticcheck
+        text: "SA1019.*server\\.Spec\\.Power is deprecated"
     paths:
       - third_party$
       - builtin$

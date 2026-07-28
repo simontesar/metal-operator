@@ -4,12 +4,13 @@
 package controller
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"slices"
-	"sort"
 	"strconv"
 	"time"
 
@@ -481,8 +482,8 @@ func (r *BIOSSettingsReconciler) handleSettingInProgressState(ctx context.Contex
 
 	settingsFlow := append([]metalv1alpha1.SettingsFlowItem{}, settings.Spec.SettingsFlow...)
 
-	sort.Slice(settingsFlow, func(i, j int) bool {
-		return settingsFlow[i].Priority <= settingsFlow[j].Priority
+	slices.SortFunc(settingsFlow, func(a, b metalv1alpha1.SettingsFlowItem) int {
+		return cmp.Compare(a.Priority, b.Priority)
 	})
 
 	// loop through all the sequence in priority order and verify/Apply the settings
@@ -623,7 +624,7 @@ func (r *BIOSSettingsReconciler) applySettingUpdate(ctx context.Context, bmcClie
 				turnOnServer,
 				conditionutils.UpdateStatus(corev1.ConditionTrue),
 				conditionutils.UpdateReason(ReasonSettingsServerPoweredOn),
-				conditionutils.UpdateMessage("Server is powered On to start the biosUpdate process"),
+				conditionutils.UpdateMessage("Server is powered On to start the bios settings update process"),
 			); err != nil {
 				return false, fmt.Errorf("failed to update power on server condition: %w", err)
 			}
@@ -1173,9 +1174,16 @@ func (r *BIOSSettingsReconciler) getSettingsDiff(ctx context.Context, bmcClient 
 				floatValue, err := strconv.ParseFloat(value, 64)
 				if err != nil {
 					errs = append(errs, fmt.Errorf("failed to check type for name %s; value %s; error: %w", key, value, err))
+					continue
 				}
 				if data != floatValue {
-					diff[key] = floatValue
+					// JSON numbers decode as float64, but integer attributes must be
+					// applied as a Go int so BMC validation (checkAttributes) passes.
+					if floatValue == math.Trunc(floatValue) {
+						diff[key] = int(floatValue)
+					} else {
+						diff[key] = floatValue
+					}
 				}
 			}
 		} else {

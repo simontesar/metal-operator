@@ -164,7 +164,7 @@ func shouldRetryReconciliation(obj client.Object) bool {
 	if !found {
 		return false
 	}
-	return val == metalv1alpha1.OperationAnnotationRetryFailed || val == metalv1alpha1.OperationAnnotationRetryFailedPropagated
+	return val == metalv1alpha1.OperationAnnotationRetry || val == metalv1alpha1.OperationAnnotationRetryPropagated
 }
 
 // shouldChildRetryReconciliation checks if the object Child should retry reconciliation.
@@ -184,7 +184,7 @@ func isChildRetryThroughSets(childObj client.Object) bool {
 	if !found {
 		return false
 	}
-	return valChildRetry == metalv1alpha1.OperationAnnotationRetryFailedPropagated
+	return valChildRetry == metalv1alpha1.OperationAnnotationRetryPropagated
 }
 
 // GenerateRandomPassword generates a random password of the given length.
@@ -203,7 +203,7 @@ func GenerateRandomPassword(length int) ([]byte, error) {
 
 func enqueueFromChildObjUpdatesExceptAnnotation(e event.UpdateEvent) bool {
 	isNil := func(arg any) bool {
-		if v := reflect.ValueOf(arg); !v.IsValid() || ((v.Kind() == reflect.Ptr ||
+		if v := reflect.ValueOf(arg); !v.IsValid() || ((v.Kind() == reflect.Pointer ||
 			v.Kind() == reflect.Interface ||
 			v.Kind() == reflect.Slice ||
 			v.Kind() == reflect.Map ||
@@ -372,7 +372,7 @@ func handleRetryAnnotationPropagation(ctx context.Context, c client.Client, pare
 
 						if err == nil && retriedCondition != nil &&
 							retriedCondition.Status == metav1.ConditionTrue &&
-							retriedCondition.Message == metalv1alpha1.OperationAnnotationRetryFailedPropagated {
+							retriedCondition.Message == metalv1alpha1.OperationAnnotationRetryPropagated {
 							// retry was already propagated to child, we can skip re-propagation to avoid infinite loop
 							return nil
 						}
@@ -386,7 +386,7 @@ func handleRetryAnnotationPropagation(ctx context.Context, c client.Client, pare
 				if annotations == nil {
 					annotations = make(map[string]string)
 				}
-				annotations[metalv1alpha1.OperationAnnotation] = metalv1alpha1.OperationAnnotationRetryFailedPropagated
+				annotations[metalv1alpha1.OperationAnnotation] = metalv1alpha1.OperationAnnotationRetryPropagated
 				childObj.SetAnnotations(annotations)
 			}
 			return nil
@@ -425,7 +425,7 @@ func GetImageCredentialsForSecretRef(ctx context.Context, c client.Client, secre
 
 func labelChangeOrAnyFieldChangeInObject(e event.UpdateEvent, oldFields, newFields []any) bool {
 	isNil := func(arg any) bool {
-		if v := reflect.ValueOf(arg); !v.IsValid() || ((v.Kind() == reflect.Ptr ||
+		if v := reflect.ValueOf(arg); !v.IsValid() || ((v.Kind() == reflect.Pointer ||
 			v.Kind() == reflect.Interface ||
 			v.Kind() == reflect.Slice ||
 			v.Kind() == reflect.Map ||

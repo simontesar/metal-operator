@@ -67,8 +67,7 @@ func newRegistryServer(t *testing.T, registerCount *atomic.Int32) *httptest.Serv
 func testObjects() (*metalv1alpha1.ServerBootConfiguration, *metalv1alpha1.Server) {
 	server := &metalv1alpha1.Server{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-server",
-			Namespace: "default",
+			Name: "test-server",
 		},
 		Spec: metalv1alpha1.ServerSpec{
 			SystemUUID: testSystemUUID,
@@ -88,7 +87,7 @@ func testObjects() (*metalv1alpha1.ServerBootConfiguration, *metalv1alpha1.Serve
 			},
 		},
 		Status: metalv1alpha1.ServerBootConfigurationStatus{
-			State: metalv1alpha1.ServerBootConfigurationStateReady,
+			State: metalv1alpha1.ServerBootConfigurationStatePending,
 		},
 	}
 	return config, server
@@ -112,24 +111,37 @@ func newProbeMocker(
 	)
 }
 
-func TestProbeMocker_StartsAgentWhenReady(t *testing.T) {
+func newFakeClient(t *testing.T, scheme *runtime.Scheme, objs ...client.Object) client.Client {
+	t.Helper()
+	return fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&metalv1alpha1.Server{}, &metalv1alpha1.ServerBootConfiguration{}).
+		WithObjects(objs...).
+		Build()
+}
+
+func TestProbeMocker_StartsAgentWhenDiscoveryPending(t *testing.T) {
 	var registerCount atomic.Int32
 	regServer := newRegistryServer(t, &registerCount)
 	defer regServer.Close()
 
 	scheme := newTestScheme(t)
 	config, serverObj := testObjects()
-	c := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&metalv1alpha1.Server{}).
-		WithObjects(config, serverObj).
-		Build()
+	c := newFakeClient(t, scheme, config, serverObj)
 
 	mocker := newProbeMocker(t, c, regServer.URL)
 	key := types.NamespacedName{Namespace: config.Namespace, Name: config.Name}
 
 	if _, err := mocker.Reconcile(context.Background(), reconcile.Request{NamespacedName: key}); err != nil {
 		t.Fatalf("reconcile: %v", err)
+	}
+
+	updated := &metalv1alpha1.ServerBootConfiguration{}
+	if err := c.Get(context.Background(), key, updated); err != nil {
+		t.Fatalf("get config: %v", err)
+	}
+	if updated.Status.State != metalv1alpha1.ServerBootConfigurationStateReady {
+		t.Fatalf("expected SBC Ready, got %q", updated.Status.State)
 	}
 
 	waitForRegisters(t, &registerCount, 1)
@@ -142,11 +154,7 @@ func TestProbeMocker_StopsAgentOnDelete(t *testing.T) {
 
 	scheme := newTestScheme(t)
 	config, serverObj := testObjects()
-	c := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&metalv1alpha1.Server{}).
-		WithObjects(config, serverObj).
-		Build()
+	c := newFakeClient(t, scheme, config, serverObj)
 
 	mocker := newProbeMocker(t, c, regServer.URL)
 	key := types.NamespacedName{Namespace: config.Namespace, Name: config.Name}
@@ -179,11 +187,7 @@ func TestProbeMocker_StopsAgentWhenServerLeavesDiscovery(t *testing.T) {
 
 	scheme := newTestScheme(t)
 	config, serverObj := testObjects()
-	c := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&metalv1alpha1.Server{}).
-		WithObjects(config, serverObj).
-		Build()
+	c := newFakeClient(t, scheme, config, serverObj)
 
 	mocker := newProbeMocker(t, c, regServer.URL)
 	key := types.NamespacedName{Namespace: config.Namespace, Name: config.Name}
@@ -215,11 +219,7 @@ func TestProbeMocker_IdempotentReconcile(t *testing.T) {
 
 	scheme := newTestScheme(t)
 	config, serverObj := testObjects()
-	c := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&metalv1alpha1.Server{}).
-		WithObjects(config, serverObj).
-		Build()
+	c := newFakeClient(t, scheme, config, serverObj)
 
 	mocker := newProbeMocker(t, c, regServer.URL)
 	key := types.NamespacedName{Namespace: config.Namespace, Name: config.Name}

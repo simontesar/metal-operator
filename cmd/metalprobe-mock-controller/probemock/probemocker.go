@@ -17,8 +17,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-const requeueInterval = 5 * time.Second
-
 type agentEntry struct {
 	cancel     context.CancelFunc
 	systemUUID string
@@ -79,7 +77,7 @@ func (p *ProbeMocker) EnqueueRequestsForServer() handler.EventHandler {
 		}
 
 		configList := &metalv1alpha1.ServerBootConfigurationList{}
-		if err := p.client.List(ctx, configList, client.InNamespace(server.Namespace)); err != nil {
+		if err := p.client.List(ctx, configList); err != nil {
 			p.log.Error(err, "Failed to list ServerBootConfigurations for Server watch",
 				"server", client.ObjectKeyFromObject(server))
 			return nil
@@ -121,37 +119,64 @@ func (p *ProbeMocker) Reconcile(ctx context.Context, req reconcile.Request) (rec
 		return reconcile.Result{}, nil
 	}
 
+	// Servers are cluster-scoped; do not use the SBC namespace for Get.
 	server := &metalv1alpha1.Server{}
-	serverKey := types.NamespacedName{
-		Namespace: config.Namespace,
-		Name:      config.Spec.ServerRef.Name,
-	}
+	serverKey := types.NamespacedName{Name: config.Spec.ServerRef.Name}
 	if err := p.client.Get(ctx, serverKey, server); err != nil {
 		return reconcile.Result{}, err
 	}
 
-	if !p.shouldRunAgent(config, server) {
+	if !p.shouldRunAgent(server) {
 		if p.agentRunning(key) {
-			log.Info("Stopping probe agent; ServerBootConfiguration not ready for discovery",
+			log.Info("Stopping probe agent; Server not ready for discovery",
 				"serverState", server.Status.State,
-				"bootConfigState", config.Status.State,
 			)
 			p.stopAgent(key)
 		}
-		return reconcile.Result{RequeueAfter: requeueInterval}, nil
+		// Keep polling only while the Server may still enter Discovery.
+		if server.Status.State == "" ||
+			server.Status.State == metalv1alpha1.ServerStateInitial ||
+			server.Status.State == metalv1alpha1.ServerStateDiscovery {
+			return reconcile.Result{Requeue: true}, nil
+		}
+		return reconcile.Result{}, nil
 	}
 
 	p.ensureAgent(key, server.Spec.SystemUUID)
+
+	// Act as the external Boot Operator: mark the SBC Ready after the
+	// agent has started so the Server controller can proceed.
+	if err := p.ensureBootConfigReady(ctx, config); err != nil {
+		return reconcile.Result{}, err
+	}
+
 	return reconcile.Result{}, nil
 }
 
-func (p *ProbeMocker) shouldRunAgent(
-	config *metalv1alpha1.ServerBootConfiguration,
-	server *metalv1alpha1.Server,
-) bool {
-	return config.Status.State == metalv1alpha1.ServerBootConfigurationStateReady &&
-		server.Status.State == metalv1alpha1.ServerStateDiscovery &&
+func (p *ProbeMocker) shouldRunAgent(server *metalv1alpha1.Server) bool {
+	return server.Status.State == metalv1alpha1.ServerStateDiscovery &&
 		server.Spec.SystemUUID != ""
+}
+
+func (p *ProbeMocker) ensureBootConfigReady(
+	ctx context.Context,
+	config *metalv1alpha1.ServerBootConfiguration,
+) error {
+	if config.Status.State == metalv1alpha1.ServerBootConfigurationStateReady {
+		return nil
+	}
+
+	base := config.DeepCopy()
+	config.Status.State = metalv1alpha1.ServerBootConfigurationStateReady
+	if err := p.client.Status().Patch(ctx, config, client.MergeFrom(base)); err != nil {
+		return err
+	}
+
+	ctrl.LoggerFrom(ctx).Info("Marked ServerBootConfiguration Ready",
+		"serverBootConfiguration", config.Name,
+		"namespace", config.Namespace,
+	)
+	return nil
 }
 
 func (p *ProbeMocker) agentRunning(key types.NamespacedName) bool {

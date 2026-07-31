@@ -119,7 +119,6 @@ func (p *ProbeMocker) Reconcile(ctx context.Context, req reconcile.Request) (rec
 		return reconcile.Result{}, nil
 	}
 
-	// Servers are cluster-scoped; do not use the SBC namespace for Get.
 	server := &metalv1alpha1.Server{}
 	serverKey := types.NamespacedName{Name: config.Spec.ServerRef.Name}
 	if err := p.client.Get(ctx, serverKey, server); err != nil {
@@ -133,7 +132,7 @@ func (p *ProbeMocker) Reconcile(ctx context.Context, req reconcile.Request) (rec
 			)
 			p.stopAgent(key)
 		}
-		// Keep polling only while the Server may still enter Discovery.
+
 		if server.Status.State == "" ||
 			server.Status.State == metalv1alpha1.ServerStateInitial ||
 			server.Status.State == metalv1alpha1.ServerStateDiscovery {
@@ -144,8 +143,6 @@ func (p *ProbeMocker) Reconcile(ctx context.Context, req reconcile.Request) (rec
 
 	p.ensureAgent(key, server.Spec.SystemUUID)
 
-	// Act as the external Boot Operator: mark the SBC Ready after the
-	// agent has started so the Server controller can proceed.
 	if err := p.ensureBootConfigReady(ctx, config); err != nil {
 		return reconcile.Result{}, err
 	}

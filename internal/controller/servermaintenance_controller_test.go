@@ -61,7 +61,7 @@ var _ = Describe("ServerMaintenance Controller", func() {
 	AfterEach(func(ctx SpecContext) {
 		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, server))).To(Succeed())
 		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, bmcSecret))).To(Succeed())
-		EnsureCleanState()
+		EnsureCleanState(ctx)
 	})
 
 	It("should force a Server into maintenance from Initial State", func(ctx SpecContext) {
@@ -535,6 +535,32 @@ var _ = Describe("ServerMaintenance Controller", func() {
 		Expect(k8sClient.Delete(ctx, unsetPriorityMaintenance)).To(Succeed())
 		Eventually(Get(unsetPriorityMaintenance)).Should(Satisfy(apierrors.IsNotFound))
 		Expect(k8sClient.Delete(ctx, serverClaim)).To(Succeed())
+	})
+
+	It("should transition ServerMaintenance to Pending state when its referenced Server no longer exists", func(ctx SpecContext) {
+		By("Creating a ServerMaintenance object")
+		serverMaintenance := &metalv1alpha1.ServerMaintenance{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-server-maintenance-orphan",
+				Namespace: ns.Name,
+			},
+			Spec: metalv1alpha1.ServerMaintenanceSpec{
+				ServerRef: &corev1.LocalObjectReference{Name: server.Name},
+				Policy:    metalv1alpha1.ServerMaintenancePolicyEnforced,
+			},
+		}
+		Expect(k8sClient.Create(ctx, serverMaintenance)).To(Succeed())
+
+		By("Deleting the Server")
+		Expect(k8sClient.Delete(ctx, server)).To(Succeed())
+		Eventually(Get(server)).ShouldNot(Succeed())
+
+		By("Expecting the ServerMaintenance to transition to Pending state")
+		Eventually(Object(serverMaintenance)).Should(HaveField("Status.State", Equal(metalv1alpha1.ServerMaintenanceStatePending)))
+
+		By("Cleaning up the ServerMaintenance")
+		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, serverMaintenance))).To(Succeed())
+		Eventually(Get(serverMaintenance)).ShouldNot(Succeed())
 	})
 
 	It("should complete deletion when the referenced Server is already gone", func(ctx SpecContext) {

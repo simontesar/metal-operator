@@ -897,7 +897,7 @@ func (s *MockServer) parseResetType(body []byte, offStates, onStates, resetState
 }
 
 func (s *MockServer) doPowerOff(systemPath string) {
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -909,7 +909,7 @@ func (s *MockServer) doPowerOff(systemPath string) {
 }
 
 func (s *MockServer) doPowerOn(systemPath, basePath string) {
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 	s.mu.Lock()
 	if base, ok := s.overrides[systemPath].(map[string]any); ok {
 		base["PowerState"] = PowerOnState
@@ -924,7 +924,7 @@ func (s *MockServer) doPowerOn(systemPath, basePath string) {
 }
 
 func (s *MockServer) doPowerReset(systemPath, basePath string) {
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 	s.mu.Lock()
 	if base, ok := s.overrides[systemPath].(map[string]any); ok {
 		base["PowerState"] = PowerOffState
@@ -950,7 +950,7 @@ func (s *MockServer) doPowerReset(systemPath, basePath string) {
 func (s *MockServer) doBMCReset(bmcPath string) {
 	// Simulate the BMC being offline during reset.
 	// The lock set by handleBMCReset prevents new POST operations during this window.
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 
 	s.mu.Lock()
 	if base, ok := s.overrides[bmcPath].(map[string]any); ok {
